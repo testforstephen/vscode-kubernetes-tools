@@ -1193,13 +1193,15 @@ const debugJavaKubernetes = (explorerNode: explorer.ResourceNode) => {
                 const podSel = await vscode.window.showQuickPick(pods, { placeHolder: `Choose the debugging pod for service ${explorerNode.id}` });
                 if (!podSel) {
                     reject();
+                    return;
                 }
                 const remoteDebugPort = await vscode.window.showInputBox({
                     prompt: `The remote debug port created by pod ${podSel}`,
                     placeHolder: "remote debug port (e.g. 5005)"
                 });
-                if (!remoteDebugPort || !Number.isInteger(Number(remoteDebugPort))) {
+                if (!remoteDebugPort) {
                     reject();
+                    return;
                 }
                 let bin = vscode.workspace.getConfiguration('vs-kubernetes')['vs-kubernetes.kubectl-path'];
                 if (!bin) {
@@ -1209,24 +1211,24 @@ const debugJavaKubernetes = (explorerNode: explorer.ResourceNode) => {
                 p.report({ message: "Creating port-forwarding..."});
                 const portMapping = [];
                 const portfinder = require('portfinder');
-                const localDebugPort = await portfinder.getPortPromise({
-                    port: Number(remoteDebugPort) + 1
-                });
+                // find a free local port for service port.
                 let localServicePort = 0;
-                portMapping.push(localDebugPort + ":" + remoteDebugPort)
-                if (Number.isInteger(targetPort) && targetPort > 0) {
+                if (targetPort) {
                     localServicePort = await portfinder.getPortPromise({
                         port: targetPort
                     });
-                    if (localServicePort === localDebugPort) {
-                        localServicePort = await portfinder.getPortPromise({
-                            port: localDebugPort + 1
-                        });
-                    }
                     portMapping.push(localServicePort + ":" + targetPort);
                 }
+                // find a free local port for debug port.
+                let localDebugPort = await portfinder.getPortPromise();
+                if (localDebugPort === localServicePort) {
+                    localDebugPort = await portfinder.getPortPromise({
+                        port: localServicePort + 1
+                    });
+                }
+                portMapping.push(localDebugPort + ":" + remoteDebugPort)
                 
-                const child = require('child_process').spawn(bin, ["port-forward", podSel].concat(portMapping));
+                const child = require('child_process').spawn(bin, ["port-forward", podSel, ...portMapping]);
                 let error = "";
                 let flag = true;
                 child.stdout.on('data', async (data) => {
@@ -1276,6 +1278,7 @@ const debugJavaKubernetes = (explorerNode: explorer.ResourceNode) => {
                     if (code) {
                         vscode.window.showErrorMessage("port-forward error: " + error);
                         reject();
+                        return;
                     }
                     resolve();
                 });
