@@ -1241,7 +1241,7 @@ const debugJavaKubernetes = (explorerNode: explorer.ResourceNode) => {
                                 if (localServicePort) {
                                     showOutput(`The service ${explorerNode.id} is proxied at localhost: http://localhost:${localServicePort}`,
                                     "port-forward for service " + explorerNode.id)
-                                    vscode.window.showInformationMessage("The debug is started, the service is proxied at: http://localhost:" + localServicePort);
+                                    vscode.window.showInformationMessage("The debug session is started, you could access the service via the proxy: http://localhost:" + localServicePort);
                                 }
                             }
                         }));
