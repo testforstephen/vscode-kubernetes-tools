@@ -18,7 +18,7 @@ import * as uuid from 'uuid';
 // Internal dependencies
 import { host } from './host';
 import * as explainer from './explainer';
-import { shell, ShellResult } from './shell';
+import { isShellResult, shell, ShellHandler, ShellResult } from './shell';
 import * as acs from './acs';
 import * as kuberesources from './kuberesources';
 import * as docker from './docker';
@@ -33,6 +33,8 @@ import { HelmRequirementsCodeLensProvider } from './helm.requirementsCodeLens';
 import { HelmTemplateHoverProvider } from './helm.hoverProvider';
 import { HelmTemplatePreviewDocumentProvider, HelmInspectDocumentProvider } from './helm.documentProvider';
 import { HelmTemplateCompletionProvider } from './helm.completionProvider';
+import { languages, Disposable } from 'vscode';
+import { setTimeout } from 'timers';
 
 let explainActive = false;
 let swaggerSpecPromise = null;
@@ -40,6 +42,7 @@ let swaggerSpecPromise = null;
 const kubectl = kubectlCreate(host, fs, shell);
 const draft = draftCreate(host, fs, shell);
 const acsui = acs.uiProvider(fs, shell);
+const kubeChannel = vscode.window.createOutputChannel("Kubernetes");
 
 // Filters for different Helm file types.
 // TODO: Consistently apply these to the provders registered.
@@ -87,6 +90,8 @@ export function activate(context) {
         vscode.commands.registerCommand('extension.vsKubernetesRemoveDebug', removeDebugKubernetes),
         vscode.commands.registerCommand('extension.vsKubernetesConfigureFromAcs', configureFromAcsKubernetes),
         vscode.commands.registerCommand('extension.vsKubernetesRefreshExplorer', () => treeProvider.refresh()),
+        vscode.commands.registerCommand('extension.vsKubernetesUseContext', useContextKubernetes),
+        vscode.commands.registerCommand('extension.vsKubernetesDebugJava', debugJavaKubernetes),
 
         // Commands - Helm
         vscode.commands.registerCommand('extension.helmVersion', helmexec.helmVersion),
@@ -287,6 +292,31 @@ function isYamlIndentChar(ch) {
     return ch === ' ' || ch === '-';
 }
 
+function kubectlDone(code: number, stdout: string, stderr: string) {
+    if (code !== 0) {
+        vscode.window.showErrorMessage('Kubectl command failed: ' + stderr);
+        console.log(stderr);
+        return;
+    }
+    vscode.window.showInformationMessage(stdout);
+}
+
+async function invokeKubectlWithProgress(command: string, message: string, handler?: ShellHandler): Promise<{}> {
+    return vscode.window.withProgress({ location: vscode.ProgressLocation.Window }, (p) => {
+        return new Promise((resolve, reject) => {
+            p.report({ message });
+            kubectl.invoke(command, (code : number, stdout : string, stderr : string) => {
+                resolve();
+                if (handler) {
+                    handler(code, stdout, stderr);
+                } else {
+                    kubectlDone(code, stdout, stderr);
+                }
+            });
+        });
+    });
+}
+
 async function explain(obj, field) {
     return new Promise((resolve) => {
         if (!obj.kind) {
@@ -484,7 +514,7 @@ function loadKubernetes(explorerNode? : explorer.ResourceNode) {
 }
 
 function loadKubernetesCore(value : string) {
-    kubectl.invoke(" -o json get " + value, (result, stdout, stderr) => {
+    invokeKubectlWithProgress(" -o json get " + value, `Loading ${value}...`, (result, stdout, stderr) => {
         if (result !== 0) {
             vscode.window.showErrorMessage('Get command failed: ' + stderr);
             return;
@@ -524,15 +554,23 @@ function exposeKubernetes() {
     kubectl.invoke(cmd);
 }
 
-function getKubernetes() {
-    let kindName = findKindName();
-    if (kindName) {
-        maybeRunKubernetesCommandForActiveWindow('get --no-headers -o wide -f ');
-        return;
+function getKubernetes(explorerNode? : explorer.ResourceNode) {
+    if (explorerNode) {
+        const terminal = vscode.window.createTerminal(explorerNode.resourceId + '-get');
+        terminal.sendText(`kubectl get ${explorerNode.resourceId} -o wide`);
+        terminal.show();
+        // const fn = kubectlOutputTo(explorerNode.resourceId + '-get');
+        // kubectl.invoke(`get ${explorerNode.resourceId} -o wide`, fn);
+    } else {
+        let kindName = findKindName();
+        if (kindName) {
+            maybeRunKubernetesCommandForActiveWindow('get --no-headers -o wide -f ');
+            return;
+        }
+        findKindNameOrPrompt(kuberesources.commonKinds, 'get', { nameOptional: true }, (value) => {
+            kubectl.invoke(" get " + value + " -o wide --no-headers");
+        });
     }
-    findKindNameOrPrompt(kuberesources.commonKinds, 'get', { nameOptional: true }, (value) => {
-        kubectl.invoke(" get " + value + " -o wide --no-headers");
-    });
 }
 
 function findVersion() {
@@ -865,8 +903,8 @@ function getLogsCore(podName : string, podNamespace? : string) {
     if (podNamespace && podNamespace.length > 0) {
         cmd += ' --namespace=' + podNamespace;
     }
-    const fn = kubectlOutputTo(podName + '-output');
-    kubectl.invoke(cmd, fn);
+    const fn = kubectlOutputTo(podName + '-logs');
+    invokeKubectlWithProgress(cmd, 'Loading logs...', fn);
 }
 
 function kubectlOutputTo(name : string) {
@@ -882,9 +920,9 @@ function kubectlOutput(result, stdout, stderr, name) {
 }
 
 function showOutput(text, name) {
-    let channel = vscode.window.createOutputChannel(name);
-    channel.append(text);
-    channel.show();
+    kubeChannel.appendLine(`[${name} ${(new Date()).toISOString().replace(/z|t/gi, ' ').trim()}]`);
+    kubeChannel.appendLine(text);
+    kubeChannel.show();
 }
 
 function getPorts() {
@@ -914,7 +952,7 @@ function describeKubernetes(explorerNode? : explorer.ResourceNode) {
 
 function describeKubernetesCore(kindName : string) {
     const fn = kubectlOutputTo(kindName + "-describe");
-    kubectl.invoke(' describe ' + kindName, fn);
+    invokeKubectlWithProgress(' describe ' + kindName, `Describing ${kindName}...`, fn);
 }
 
 function selectContainerForPod(pod, callback) {
@@ -949,9 +987,11 @@ function execKubernetes() {
     execKubernetesCore(false);
 }
 
-function terminalKubernetes(explorerNode? : explorer.ResourceNode) {
+async function terminalKubernetes(explorerNode? : explorer.ResourceNode) {
     if (explorerNode) {
-        execTerminalOnPod(explorerNode.id, 'bash');
+        // For docker image built from BusyBox, bash may not be installed by default. Use sh instead.
+        const bash = await checkBash(explorerNode.id);
+        execTerminalOnPod(explorerNode.id, bash ? 'bash' : 'sh');
     } else {
         execKubernetesCore(true);
     }
@@ -989,9 +1029,20 @@ function execKubernetesCore(isTerminal) {
 }
 
 function execTerminalOnPod(podName : string, terminalCmd : string) {
-    const terminalExecCmd : string[] = ['exec', '-it', podName, terminalCmd];
+    const terminalExecCmd : string[] = ['exec', '-it', podName, '--', terminalCmd];
     const term = vscode.window.createTerminal(`${terminalCmd} on ${podName}`, kubectl.path(), terminalExecCmd);
     term.show();
+}
+
+function checkBash(podName : string): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+        kubectl.invoke(`exec ${podName} -- ls -la /bin/bash`, (code, stdout, stderr) => {
+            if (code !== 0) {
+                resolve(false);
+            }
+            resolve(true);
+        });
+    });
 }
 
 function syncKubernetes() {
@@ -1016,16 +1067,30 @@ function syncKubernetes() {
     });
 }
 
-const deleteKubernetes = () => {
-    findKindNameOrPrompt(kuberesources.commonKinds, 'delete', { nameOptional: true }, (kindName) => {
-        if (kindName) {
-            let commandArgs = kindName;
-            if (!containsName(kindName)) {
-                commandArgs = kindName + " --all";
+const deleteKubernetes = (explorerNode? : explorer.ResourceNode) => {
+    if (explorerNode) {
+        invokeKubectlWithProgress(`delete ${explorerNode.resourceId}`,
+            `Deleting ${explorerNode.resourceId}...`,
+            async (code : number, stdout : string, stderr : string) => {
+                if (code !== 0) {
+                    vscode.window.showErrorMessage('Kubectl command failed: ' + stderr);
+                    console.log(stderr);
+                    return;
+                }
+                await vscode.window.showInformationMessage(stdout);
+                vscode.commands.executeCommand("extension.vsKubernetesRefreshExplorer");
+            });
+    } else {
+        findKindNameOrPrompt(kuberesources.commonKinds, 'delete', { nameOptional: true }, (kindName) => {
+            if (kindName) {
+                let commandArgs = kindName;
+                if (!containsName(kindName)) {
+                    commandArgs = kindName + " --all";
+                }
+                kubectl.invoke('delete ' + commandArgs);
             }
-            kubectl.invoke('delete ' + commandArgs);
-        }
-    });
+        });
+    }
 };
 
 const applyKubernetes = () => {
@@ -1092,6 +1157,129 @@ const diffKubernetes = (callback) => {
 
                     callback();
                 });
+        });
+    });
+};
+
+const debugJavaKubernetes = (explorerNode: explorer.ResourceNode) => {
+    vscode.window.withProgress({ location: vscode.ProgressLocation.Window }, (p) => {
+        return new Promise((resolve, reject) => {
+            p.report({ message: "Querying the service port..." });
+            kubectl.invoke(`get ${explorerNode.resourceId} -o json`, async (code, stdout, stderr) => {
+                if (code !== 0) {
+                    vscode.window.showErrorMessage('Kubectl command failed: ' + stderr);
+                    console.log(stderr);
+                    reject();
+                    return;
+                }
+                const json = JSON.parse(stdout);
+                let targetPort = 0;
+                if (Array.isArray(json.spec.ports) && json.spec.ports.length) {
+                    targetPort = json.spec.ports[0].targetPort || json.spec.ports[0].port;
+                }
+
+                p.report({ message: "Querying the possible pods..."});
+                const childrenLines = await kubectl.asLines("get pods");
+                if (isShellResult(childrenLines)) {
+                    vscode.window.showErrorMessage(childrenLines.stderr);
+                    reject();
+                    return;
+                }
+                const pods = childrenLines.map((line) => {
+                    return line.split(" ")[0];
+                });
+
+                p.report({ message: "Waiting for user input..."});
+                const podSel = await vscode.window.showQuickPick(pods, { placeHolder: `Choose the debugging pod for service ${explorerNode.id}` });
+                if (!podSel) {
+                    reject();
+                }
+                const remoteDebugPort = await vscode.window.showInputBox({
+                    prompt: `The remote debug port created by pod ${podSel}`,
+                    placeHolder: "remote debug port (e.g. 5005)"
+                });
+                if (!remoteDebugPort || !Number.isInteger(Number(remoteDebugPort))) {
+                    reject();
+                }
+                let bin = vscode.workspace.getConfiguration('vs-kubernetes')['vs-kubernetes.kubectl-path'];
+                if (!bin) {
+                    bin = 'kubectl';
+                }
+
+                p.report({ message: "Creating port-forwarding..."});
+                const portMapping = [];
+                const portfinder = require('portfinder');
+                const localDebugPort = await portfinder.getPortPromise({
+                    port: Number(remoteDebugPort) + 1
+                });
+                let localServicePort = 0;
+                portMapping.push(localDebugPort + ":" + remoteDebugPort)
+                if (Number.isInteger(targetPort) && targetPort > 0) {
+                    localServicePort = await portfinder.getPortPromise({
+                        port: targetPort
+                    });
+                    if (localServicePort === localDebugPort) {
+                        localServicePort = await portfinder.getPortPromise({
+                            port: localDebugPort + 1
+                        });
+                    }
+                    portMapping.push(localServicePort + ":" + targetPort);
+                }
+                
+                const child = require('child_process').spawn(bin, ["port-forward", podSel].concat(portMapping));
+                let error = "";
+                let flag = true;
+                child.stdout.on('data', async (data) => {
+                    const message = `${data}`;
+                    if (flag && /Forwarding\s+from\s+127\.0\.0\.1:/.test(message)) {
+                        flag = false;
+                        p.report({ message: "Launching debug session..."});
+                        const sessionName = `${Date.now()}`;
+                        const disposables: vscode.Disposable[] = [];
+                        disposables.push(vscode.debug.onDidStartDebugSession((debugSession) => {
+                            if (debugSession.name === sessionName) {
+                                if (localServicePort) {
+                                    showOutput(`The service ${explorerNode.id} is proxied at localhost: http://localhost:${localServicePort}`,
+                                    "port-forward for service " + explorerNode.id)
+                                    vscode.window.showInformationMessage("The debug is started, the service is proxied at: http://localhost:" + localServicePort);
+                                }
+                            }
+                        }));
+                        disposables.push(vscode.debug.onDidTerminateDebugSession((debugSession) => {
+                            if (debugSession.name === sessionName) {
+                                child.kill();
+                                disposables.forEach((d) => d.dispose);
+                            }
+                        }));
+
+                        const workspaceFolder = vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0] : undefined;
+                        const success = await vscode.debug.startDebugging(workspaceFolder, {
+                            type: "java",
+                            name: sessionName,
+                            request: "attach",
+                            hostName: "localhost",
+                            port: localDebugPort
+                        });
+                        resolve();
+                        if (!success) {
+                            child.kill();
+                            disposables.forEach((d) => d.dispose);
+                        }
+                    }
+                });
+                child.stderr.on('data', (data) => {
+                    console.log(`stderr: ${data}`);
+                    error += data;
+                });
+                child.on('close', (code) => {
+                    flag = false;
+                    if (code) {
+                        vscode.window.showErrorMessage("port-forward error: " + error);
+                        reject();
+                    }
+                    resolve();
+                });
+            });
         });
     });
 };
@@ -1248,6 +1436,17 @@ async function configureFromAcsKubernetes(request? : acs.UIRequest) {
         vscode.commands.executeCommand('vscode.previewHtml', acs.operationUri(newId), 2, "Configure Kubernetes");
         await acsui.next({ operationId: newId, requestData: undefined });
     }
+}
+
+function useContextKubernetes(explorerNode: explorer.ResourceNode) {
+    const targetContext = explorerNode.metadata.context;
+    kubectl.invoke(`config use-context ${targetContext}`, (code: number, stdout: string, stderr: string) => {
+        if (!code) {
+            vscode.commands.executeCommand("extension.vsKubernetesRefreshExplorer");
+        } else {
+            vscode.window.showErrorMessage(`set current cluster failed: ${stderr}`);
+        }
+    });
 }
 
 async function execDraftVersion() {
