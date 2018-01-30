@@ -11,7 +11,6 @@ import { fs } from './fs';
 
 // External dependencies
 import * as yaml from 'js-yaml';
-import * as dockerfileParse from 'dockerfile-parse';
 import * as tmp from 'tmp';
 import * as uuid from 'uuid';
 
@@ -38,6 +37,9 @@ import { HelmTemplateHoverProvider } from './helm.hoverProvider';
 import { HelmTemplatePreviewDocumentProvider, HelmInspectDocumentProvider } from './helm.documentProvider';
 import { HelmTemplateCompletionProvider } from './helm.completionProvider';
 
+import { DebugService } from './debug/debugService';
+import { DockerfileParser } from './debug/dockerfileParser';
+
 let explainActive = false;
 let swaggerSpecPromise = null;
 
@@ -45,7 +47,7 @@ const kubectl = kubectlCreate(host, fs, shell);
 const draft = draftCreate(host, fs, shell);
 const configureFromClusterUI = configureFromCluster.uiProvider(fs, shell);
 const createClusterUI = createCluster.uiProvider(fs, shell);
-
+const debugService = new DebugService(kubectl);
 const deleteMessageItems: vscode.MessageItem[] = [
     {
         title: "Delete"
@@ -98,8 +100,9 @@ export function activate(context) {
         vscode.commands.registerCommand('extension.vsKubernetesTerminal', terminalKubernetes),
         vscode.commands.registerCommand('extension.vsKubernetesDiff', diffKubernetes),
         vscode.commands.registerCommand('extension.vsKubernetesScale', scaleKubernetes),
-        vscode.commands.registerCommand('extension.vsKubernetesDebug', debugKubernetes),
-        vscode.commands.registerCommand('extension.vsKubernetesRemoveDebug', removeDebugKubernetes),
+        vscode.commands.registerCommand('extension.vsKubernetesDebugLaunch', debugLaunchKubernetes),
+        vscode.commands.registerCommand('extension.vsKubernetesDebugAttach', debugAttachKubernetes),
+
         vscode.commands.registerCommand('extension.vsKubernetesConfigureFromCluster', configureFromClusterKubernetes),
         vscode.commands.registerCommand('extension.vsKubernetesCreateCluster', createClusterKubernetes),
         vscode.commands.registerCommand('extension.vsKubernetesRefreshExplorer', () => treeProvider.refresh()),
@@ -920,14 +923,8 @@ function getPorts() {
     if (!fs.existsSync(file)) {
         return null;
     }
-    try {
-        let data = fs.readFileSync(file, 'utf-8');
-        let obj = dockerfileParse(data);
-        return obj.expose;
-    } catch (ex) {
-        console.log(ex);
-        return null;
-    }
+    const dockerfilerParser = new DockerfileParser(file);
+    return dockerfilerParser.getExposedPorts();
 }
 
 function describeKubernetes(explorerNode? : explorer.ResourceNode) {
@@ -1154,104 +1151,26 @@ const diffKubernetes = (callback) => {
     });
 };
 
-const debugKubernetes = () => {
-    buildPushThenExec(_debugInternal);
+const debugLaunchKubernetes = async () => {
+    if (!vscode.workspace.workspaceFolders) {
+        vscode.window.showErrorMessage('This command requires an open folder.');
+        return;
+    }
+    const workspaceFolder = await vscode.window.showWorkspaceFolderPick();
+    if (workspaceFolder) {
+        debugService.launchDebug(workspaceFolder);
+    }
 };
 
-const _debugInternal = (name, image) => {
-    // TODO: optionalize/customize the '-debug'
-    // TODO: make this smarter.
-    vscode.window.showInputBox({
-        prompt: 'Debug command for your container:',
-        placeHolder: 'Example: node debug server.js' }
-    ).then((cmd) => {
-        if (!cmd) {
-            return;
-        }
-
-        _doDebug(name, image, cmd);
-    });
-};
-
-const _doDebug = (name, image, cmd) => {
-    const deploymentName = `${name}-debug`;
-    const runCmd = `run ${deploymentName} --image=${image} -i --attach=false -- ${cmd}`;
-    console.log(runCmd);
-
-    kubectl.invoke(runCmd, (result, stdout, stderr) => {
-        if (result !== 0) {
-            vscode.window.showErrorMessage('Failed to start debug container: ' + stderr);
-            return;
-        }
-
-        findDebugPodsForApp((podList) => {
-            if (podList.items.length === 0) {
-                vscode.window.showErrorMessage('Failed to find debug pod.');
-                return;
-            }
-
-            let podName = podList.items[0].metadata.name;
-            vscode.window.showInformationMessage('Debug pod running as: ' + podName);
-
-            waitForRunningPod(podName, () => {
-                kubectl.invoke(` port-forward ${podName} 5858:5858 8000:8000`);
-
-                const debugConfiguration = {
-                    type: 'node',
-                    request: 'attach',
-                    name: 'Attach to Process',
-                    port: 5858,
-                    localRoot: vscode.workspace.rootPath,
-                    remoteRoot: '/'
-                };
-                
-                vscode.debug.startDebugging(
-                    undefined,
-                    debugConfiguration
-                ).then(() => {
-                    vscode.window.showInformationMessage('Debug session established', 'Expose Service').then((opt) => {
-                        if (opt !== 'Expose Service') {
-                            return;
-                        }
-
-                        vscode.window.showInputBox({ prompt: 'Expose on which port?', placeHolder: '80' }).then((port) => {
-                            if (!port) {
-                                return;
-                            }
-
-                            const exposeCmd = `expose deployment ${deploymentName} --type=LoadBalancer --port=${port}`;
-                            kubectl.invoke(exposeCmd, (result, stdout, stderr) => {
-                                if (result !== 0) {
-                                    vscode.window.showErrorMessage('Failed to expose deployment: ' + stderr);
-                                    return;
-                                }
-                                vscode.window.showInformationMessage('Deployment exposed. Run Kubernetes Get > service ' + deploymentName + ' for IP address');
-                            });
-                        });
-                    });
-                }, (err) => {
-                    vscode.window.showInformationMessage('Error: ' + err.message);
-                });
-            });
-        });
-    });
-};
-
-const waitForRunningPod = (name, callback) => {
-    kubectl.invoke(` get pods ${name} -o jsonpath --template="{.status.phase}"`,
-        (result, stdout, stderr) => {
-            if (result !== 0) {
-                vscode.window.showErrorMessage(`Failed to run command (${result}) ${stderr}`);
-                return;
-            }
-
-            if (stdout === 'Running') {
-                callback();
-                return;
-            }
-
-            setTimeout(() => waitForRunningPod(name, callback), 1000);
-        });
+const debugAttachKubernetes = async (explorerNode: explorer.KubernetesObject) => {
+    if (!vscode.workspace.workspaceFolders) {
+        vscode.window.showErrorMessage('This command requires an open folder.');
+        return;
+    }
+    const workspaceFolder = await vscode.window.showWorkspaceFolderPick();
+    if (workspaceFolder) {
+        debugService.attachDebug(workspaceFolder, explorerNode ? explorerNode.id : null);
+    }
 };
 
 function exists(kind, name, handler) {
@@ -1267,36 +1186,6 @@ function deploymentExists(deploymentName, handler) {
 
 function serviceExists(serviceName, handler) {
     exists('services', serviceName, handler);
-}
-
-function removeDebugKubernetes() {
-    //eslint-disable-next-line no-unused-vars
-    findNameAndImage().then((name, image) => {
-        let deploymentName = name + '-debug';
-        deploymentExists(deploymentName, (deployment) => {
-            serviceExists(deploymentName, (service) => {
-                if (!deployment && !service) {
-                    vscode.window.showInformationMessage(deploymentName + ': nothing to clean up');
-                    return;
-                }
-
-                let toDelete = deployment ? ('deployment' + (service ? ' and service' : '')) : 'service';
-                vscode.window.showWarningMessage('This will delete ' + toDelete + ' ' + deploymentName, 'Delete').then((opt) => {
-                    if (opt !== 'Delete') {
-                        return;
-                    }
-
-                    if (service) {
-                        kubectl.invoke('delete service ' + deploymentName);
-                    }
-
-                    if (deployment) {
-                        kubectl.invoke('delete deployment ' + deploymentName);
-                    }
-                });
-            });
-        });
-    });
 }
 
 async function configureFromClusterKubernetes(request? : WizardUIRequest) {

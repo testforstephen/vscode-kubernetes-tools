@@ -37,8 +37,8 @@
         "onCommand:extension.vsKubernetesTerminal",
         "onCommand:extension.vsKubernetesDiff",
         "onCommand:extension.vsKubernetesScale",
-        "onCommand:extension.vsKubernetesDebug",
-        "onCommand:extension.vsKubernetesRemoveDebug",
+        "onCommand:extension.vsKubernetesDebugLaunch",
+        "onCommand:extension.vsKubernetesDebugAttach",
         "onCommand:extension.vsKubernetesConfigureFromCluster",
         "onCommand:extension.vsKubernetesCreateCluster",
         "onCommand:extension.helmTemplate",
@@ -199,6 +199,11 @@
                     "when": "view == extension.vsKubernetesExplorer && viewItem == vsKubernetes.resource.pod"
                 },
                 {
+                    "command": "extension.vsKubernetesDebugAttach",
+                    "group": "1@4",
+                    "when": "view == extension.vsKubernetesExplorer && viewItem == vsKubernetes.resource.pod"
+                },
+                {
                     "command": "extension.vsKubernetesDescribe",
                     "group": "2",
                     "when": "view == extension.vsKubernetesExplorer && viewItem == vsKubernetes.resource.pod"
@@ -309,13 +314,13 @@
                 "category": "Kubernetes"
             },
             {
-                "command": "extension.vsKubernetesDebug",
-                "title": "Debug",
+                "command": "extension.vsKubernetesDebugLaunch",
+                "title": "Debug (Launch)",
                 "category": "Kubernetes"
             },
             {
-                "command": "extension.vsKubernetesRemoveDebug",
-                "title": "Remove Debug",
+                "command": "extension.vsKubernetesDebugAttach",
+                "title": "Debug (Attach)",
                 "category": "Kubernetes"
             },
             {
@@ -476,16 +481,17 @@
         "test": "node ./node_modules/vscode/bin/test"
     },
     "dependencies": {
-        "shelljs": "^0.7.7",
-        "js-yaml": "^3.8.2",
-        "dockerfile-parse": "^0.2.0",
-        "k8s": "^0.4.12",
-        "tmp": "^0.0.31",
-        "pluralize": "^4.0.0",
-        "uuid": "^3.1.0",
-        "yamljs": "0.2.10",
         "compare-versions": "^3.1.0",
-        "lodash": ">3"
+        "docker-file-parser": "^1.0.3",
+        "js-yaml": "^3.8.2",
+        "k8s": "^0.4.12",
+        "lodash": ">3",
+        "pluralize": "^4.0.0",
+        "portfinder": "^1.0.13",
+        "shelljs": "^0.7.7",
+        "tmp": "^0.0.31",
+        "uuid": "^3.1.0",
+        "yamljs": "0.2.10"
     },
     "devDependencies": {
         "@types/mocha": "^2.2.32",
