@@ -387,14 +387,14 @@ export class DebugService implements IDebugService {
                     disposables.push(vscode.debug.onDidTerminateDebugSession((debugSession) => {
                         if (debugSession.name === sessionName) {
                             proxyProcess.kill();
-                            disposables.forEach((d) => d.dispose);
+                            disposables.forEach((d) => d.dispose());
                         }
                     }));
     
                     const success = this.debugProvider.startDebugging(workspaceFolder, sessionName, proxyDebugPort);
                     if (!success) {
                         proxyProcess.kill();
-                        disposables.forEach((d) => d.dispose);
+                        disposables.forEach((d) => d.dispose());
                         reject();
                         return;
                     }

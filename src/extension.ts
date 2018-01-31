@@ -1151,23 +1151,25 @@ const diffKubernetes = (callback) => {
     });
 };
 
-const debugLaunchKubernetes = async () => {
+async function showWorkspaceFolderPick(): Promise<vscode.WorkspaceFolder> {
     if (!vscode.workspace.workspaceFolders) {
         vscode.window.showErrorMessage('This command requires an open folder.');
         return;
+    } else if (vscode.workspace.workspaceFolders.length === 1) {
+        return vscode.workspace.workspaceFolders[0];
     }
-    const workspaceFolder = await vscode.window.showWorkspaceFolderPick();
+    return await vscode.window.showWorkspaceFolderPick();
+}
+
+const debugLaunchKubernetes = async () => {
+    const workspaceFolder = await showWorkspaceFolderPick();
     if (workspaceFolder) {
         debugService.launchDebug(workspaceFolder);
     }
 };
 
 const debugAttachKubernetes = async (explorerNode: explorer.KubernetesObject) => {
-    if (!vscode.workspace.workspaceFolders) {
-        vscode.window.showErrorMessage('This command requires an open folder.');
-        return;
-    }
-    const workspaceFolder = await vscode.window.showWorkspaceFolderPick();
+    const workspaceFolder = await showWorkspaceFolderPick();
     if (workspaceFolder) {
         debugService.attachDebug(workspaceFolder, explorerNode ? explorerNode.id : null);
     }
